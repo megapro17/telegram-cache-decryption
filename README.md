@@ -1,16 +1,35 @@
 # telegram-cache-decryption
 
-**Update**: Last tested to work with Telegram Desktop version: 4.2.4.
+Доработанная версия программы:
 
-Decrypt the media cache of Telegram Desktop.
+ - Не требует огромных зависимостей по типу PyQt5
+ - Работает полностью на питоне, без модулей на C
+ - Проставляет расширение файла автоматически
+ - Выставляет у файлов корректную дату изменения чтобы можно было отсортировать
+ - Грузит все ядра процессора
 
-This program will read encrypted Telegram Desktop's media cache and write decrypted data in current directory.
+Для чего это нужно?
+Можно посмотреть файлы которые лежат у вас на компьютере в кеше, например если картинку в чате отредактировали, или вас заблокировали в группе
 
-Read the code and adjust. It may not work for older or newer versions of Telegram Desktop. You should also be aware that the Telegram Desktop cache data is private to you and writing out decrypted data may be risky for leakage.
+Спасибо Bing чату без которого это бы не получилось сделать, с шифрованием самому разобраться невозможно
 
-# Dependencies
-* Python 3
-* python-cffi
-* PyQt5
-* OpenSSL
-* tgcrypto
+Установка:
+```
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install -U wheel pip
+
+pip install -r requirements.txt
+```
+
+Запуск по умолчанию:
+
+`python telegram-cache-decryption.py`
+
+Если сторонний клиент:
+
+`python telegram-cache-decryption.py -k "C:\Users\megapro17\AppData\Roaming\64Gram Desktop\tdata\key_datas" -c "C:\Users\megapro17\AppData\Roaming\64Gram Desktop\tdata\user_data"`
+
+Задать выходную папку:
+
+`python telegram-cache-decryption.py -o "C:\Users\megapro17\Desktop\telega"`

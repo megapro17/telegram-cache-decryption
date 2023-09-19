@@ -1,0 +1,4 @@
+argparse
+cryptography
+python-magic-bin
+tgcrypto

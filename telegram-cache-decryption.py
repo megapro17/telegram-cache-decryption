@@ -1,24 +1,51 @@
+import argparse
+import concurrent.futures
 import hashlib
-import cffi
-
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-
-from PyQt5 import QtCore
+import io 
+import magic
+import os
 import tgcrypto
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from pathlib import Path
 
-ffi = cffi.FFI()
 
 def read_key(name):
-    qstream = readFile(name)
-    salt = qstream.readBytes()
-    key_encrypted = qstream.readBytes()
+    data = read_keyfile(name)
+    salt = data.read(32)
+    data.read(4)
+    key_encrypted = data.read(288)
+    # Я не знаю чё за оффсеты так считывал QByteArray
 
-    PassKey = createLocalKey(b'', salt)
-    keyData = decryptLocal(key_encrypted, PassKey)
-    LocalKey = keyData
-    return LocalKey
+    pass_key = create_local_key(b'', salt)
+    key_data = decrypt_local(key_encrypted, pass_key)
+    local_key = key_data
+    return local_key
 
+def read_keyfile(name):
+    with open(name, 'rb') as f:
+        if f.read(4) != b'TDF$':
+            print('wrong file type')
+            return None
+
+        version = f.read(4)
+        data = f.read()
+
+    m = hashlib.md5()
+    m.update(data[:-16])
+    data_size = len(data)-16
+    m.update(data_size.to_bytes(4, 'little'))
+    m.update(version)
+    m.update(b'TDF$')
+    digest = m.digest()
+
+    if digest != data[-16:]:
+        print('checksum mismatch')
+        return None
+
+    data = io.BytesIO(data)
+    data.seek(4)
+    return data
 
 def sha1(data):
     m = hashlib.sha1()
@@ -51,19 +78,7 @@ def prepareAES_oldmtp(key, msgKey):
 
     return aesKey, aesIv
 
-
-def aesIgeDecryptRaw(
-    src: bytes,
-    key: bytes,
-    iv: bytes) -> bytes:
-  # Используем Cipher из cryptography для создания AES-IGE шифрования
-  cipher = Cipher(algorithms.AES(key), modes.IGE(iv), backend=default_backend())
-  # Создаем дешифратор
-  decryptor = cipher.decryptor()
-  # Возвращаем расшифрованные данные
-  return decryptor.update(src) + decryptor.finalize()
-
-def incrementIv(iv: bytes, blockIndex: int) -> bytes:
+def increment_iv(iv: bytes, blockIndex: int) -> bytes:
   if not blockIndex:
     return iv
   digits = 16
@@ -76,28 +91,28 @@ def incrementIv(iv: bytes, blockIndex: int) -> bytes:
     increment >>= 8
   return bytes(iv_list) # Преобразуем список обратно в байты
 
-def my_CRYPTO_ctr128_encrypt(
+def ctr128_encrypt(
     src: bytes,
     key: bytes,
     block_index: int,
     iv: bytes) -> bytes:
   # Используем Cipher из cryptography для создания AES-CTR шифрования
-  cipher = Cipher(algorithms.AES(key), modes.CTR(incrementIv(iv, block_index)), backend=default_backend())
+  cipher = Cipher(algorithms.AES(key), modes.CTR(increment_iv(iv, block_index)), backend=default_backend())
   # Создаем шифратор
   encryptor = cipher.encryptor()
   # Возвращаем зашифрованные данные
   return encryptor.update(src) + encryptor.finalize()
 
 
-def aesDecryptLocal(src, key, key128):
+def aes_decrypt_local(src, key, key128):
     aesKey, aesIV = prepareAES_oldmtp(key, key128)
     dst = tgcrypto.ige256_decrypt(src, aesKey, aesIV)
     return bytearray(dst)
 
 
-def decryptLocal(encrypted, key):
+def decrypt_local(encrypted, key):
     encryptedKey = encrypted[:16]
-    decrypted = aesDecryptLocal(
+    decrypted = aes_decrypt_local(
         encrypted[16:], key, encryptedKey)
     if sha1(decrypted)[:16] != encryptedKey:
         raise ValueError('bad checksum for decrypted data')
@@ -106,10 +121,7 @@ def decryptLocal(encrypted, key):
     return decrypted[4:dataLen]
 
 
-keySize = 256
-
-
-def createLocalKey(passcode, salt):
+def create_local_key(passcode, salt):
     hashKey = hashlib.sha512(salt)
     hashKey.update(passcode)
     hashKey.update(salt)
@@ -119,41 +131,10 @@ def createLocalKey(passcode, salt):
                               salt, iterCount, 256)
     return bytearray(dst)
 
-
-def readFile(name):
-    with open(name, 'rb') as f:
-        if f.read(4) != b'TDF$':
-            #raise ValueError('wrong file type')
-            return None
-
-        version = f.read(4)
-        data = f.read()
-
-    m = hashlib.md5()
-    m.update(data[:-16])
-    data_size = len(data)-16
-    m.update(data_size.to_bytes(4, 'little'))
-    m.update(version)
-    m.update(b'TDF$')
-    digest = m.digest()
-
-    if digest != data[-16:]:
-        raise ValueError('checksum mismatch')
-
-    qbytes = QtCore.QByteArray(data)
-    return QtCore.QDataStream(qbytes)
-
-
-def readEncryptedFile(name, key):
-    qstream = readFile(name)
-    encrypted = qstream.readBytes()
-    return decryptLocal(encrypted, key)
-
-
 def storage_file_read(path, key):
     with open(path, 'rb') as f:
         if f.read(4) != b'TDEF':
-            #raise ValueError('wrong file type')
+            print(f"wrong key type at {path}")
             return None
 
         salt = f.read(64)
@@ -180,40 +161,75 @@ class decryptor:
         self.iv = iv
 
     def decrypt(self, src):
-        #dst = bytearray(len(src))
-        #buffer = ffi.from_buffer(dst)
-        #iv = ffi.from_buffer(bytearray(self.iv))
-        dst = my_CRYPTO_ctr128_encrypt(
+        dst = ctr128_encrypt(
             src, self.key, self.block_index, self.iv
         )
         self.block_index += len(src) // 16
         return dst
 
+def process_file(path):
+    if path.is_file() and path.parent != cache and path.name not in ['version', 'binlog']:
+        print('Decrypting', path)
+        data = storage_file_read(path, local_key)
+        if data is not None:
+            mime = magic.from_buffer(data, mime=True)
+            ext = mime.split('/')[1] # mimetypes не может определить разрешение у webp
+            if ext == "octet-stream":
+                ext = ".bin"
+                if not args.unknown:
+                    return
+            elif ext == "x-gzip":
+                ext = ".gz"
+                if not args.unknown:
+                    return
+            else:
+                ext = '.' + ext
 
-def main():
-    import os
+            timestamp = os.path.getmtime(path)
+            if args.directories:
+                newf = out / path.relative_to(cache)
+                newf.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                newf = out
+                newf = newf / path.name
 
-    LocalKey = read_key(r'C:\Users\megapro17\AppData/Roaming/64Gram Desktop/tdata/key_datas')
-    topdir = os.path.expanduser(
-        r'C:\Users\megapro17\telegram-cache-decryption\o')
-    for root, _, files in os.walk(topdir):
-        if files:
-            newdir = root[len(topdir):].lstrip('/')
-            os.makedirs(newdir, exist_ok=True)
+            newf = newf.with_suffix(ext)
+            #print(newf)
+            with open(newf, 'wb') as f:
+                f.write(data)
+            os.utime(newf, (timestamp, timestamp))
 
-        for name in files:
-            if name in ['version', 'binlog']:
-                continue
+parser = argparse.ArgumentParser()
+parser.add_argument('-s', "--single", action='store_true', help='Один поток')
+parser.add_argument('-d', "--directories", action='store_true', help='Создать структуру папок')
+parser.add_argument('-o', "--output", default="out", help='Выходная папка')
+parser.add_argument('-k', "--key", default=None, help=r"Адрес к ключу, по умолчанию %appdata%/Telegram Desktop/tdata/key_datas")
+parser.add_argument('-c', "--cache", default=None, help="Путь к зашифрованным файлам")
+parser.add_argument('-u', "--unknown", action='store_true', help="Сохранять неизвестные файлы")
+args = parser.parse_args()
 
-            path = os.path.join(root, name)
-            print('Decrypting', path)
-            data = storage_file_read(path, LocalKey)
-            if data != None:
-                newf = os.path.join(newdir, name)
-                print(newf)
-                with open(newf, 'wb') as f:
-                    f.write(data)
+out = Path(args.output)
+local_key = None
+if not args.key:
+    local_key = read_key(Path(os.getenv("APPDATA") / Path("Telegram Desktop/tdata/key_datas")))
+else:
+    local_key = read_key(Path(args.key))
+
+cache = None
+if not args.cache:
+    cache = Path(os.getenv("APPDATA")) / Path('Telegram Desktop/tdata/user_data/cache').resolve()
+else:
+    cache = Path(args.cache)
+
+#if not out.is_absolute():
+#    out = Path.joinpath(Path.cwd(), out)
+out.mkdir(parents=True, exist_ok=True)
+
+if args.single:
+    for i in cache.rglob('*'):
+        process_file(i)
+else:
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        executor.map(process_file, cache.rglob('*'))
 
 
-if __name__ == '__main__':
-    main()
